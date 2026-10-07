@@ -62,7 +62,7 @@ def evalEstimate(loader):
     return len(loader.dataset) * (0.0005 if workers else 0.002) + 5 * workers
 
 
-def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT,
+def train(trainLoader, validLoader, lr=0.001, epoch=10, evalEvery=500, seed=0, path=CHECKPOINT,
           log=print, stop=None, onEval=None, startTime=None):
     # trains with Adam until time runs out or stop is set, keeps the best weights (path=None skips saving)
     # the whole run, loader start-up and final validation included, fits in the time budget
@@ -75,11 +75,9 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
     batch = trainLoader.batch_size
     step, best, bestState = 0, -1.0, None
     history = []
-    begin = startTime or time.time()
-    deadline = begin + minutes * 60
-    evalCost = evalEstimate(validLoader)
-    log(f"Training on {dev} for up to {minutes} minutes in total (Adam, lr={lr})")
-    while True:
+    begin = time.time()
+    log(f"Training on {dev} for {epoch} epochs in total (Adam, lr={lr})")
+    for epoch in range:
         for x, y in trainLoader:
             model.train()
             x, y = x.to(dev), y.to(dev)
@@ -89,38 +87,24 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
             optimizer.step()
             step += 1
 
-            stopped = stop is not None and stop.is_set()
-            # stop early enough to leave room for the final validation pass
-            timeUp = stopped or time.time() >= deadline - evalCost
-            if step % evalEvery == 0 or timeUp:
-                evalStart = time.time()
-                vLoss, vAcc, _, _ = evaluate(model, validLoader, dev)
-                evalCost = time.time() - evalStart
-                epochs = step * batch / len(trainLoader.dataset)
-                elapsed = time.time() - begin
-                log(f"step {step:5d} epoch {epochs:4.2f} {elapsed:5.0f}s  "
-                    f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
-                history.append({"step": step, "epoch": epochs, "seconds": elapsed,
-                                "trainLoss": loss.item(), "valLoss": vLoss, "valAcc": vAcc})
-                if onEval:
-                    onEval(history[-1])
-                if vAcc > best:
-                    best = vAcc
-                    bestState = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                    if path:
-                        save(bestState, path, valAcc=vAcc, step=step, lr=lr, history=history)
-            if timeUp:
-                reason = "Stopped" if stopped else "Time budget reached"
-                if path:
-                    # save again so the history covers the whole run
-                    save(bestState, path, valAcc=best, step=history[-1]["step"], lr=lr, history=history)
-                    log(f"{reason}. Best validation accuracy {best:.3f}, saved to {path}")
-                else:
-                    log(f"{reason}. Final validation accuracy {history[-1]['valAcc']:.3f}")
-                return history
+    if step % evalEvery == 0:
+        vLoss, vAcc, _, _ = evaluate(model, validLoader, dev)
+        elapsed = time.time() - begin
+        log(f"step {step:5d} epoch {epoch:4.2f} {elapsed:5.0f}s  "
+            f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
+        history.append({"step": step, "epoch": epoch, "seconds": elapsed,
+                        "trainLoss": loss.item(), "valLoss": vLoss, "valAcc": vAcc})
+        if onEval:
+            onEval(history[-1])
+        if vAcc > best:
+            best = vAcc
+            bestState = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            if path:
+                save(bestState, path, valAcc=vAcc, step=step, lr=lr, history=history)
+    return history
 
 
-def kfold(k=3, lr=0.001, minutes=10, batchSize=64, datasetPower=imageImport.DATASET_POWER,
+def kfold(k=3, lr=0.001, epoch=10, batchSize=64, datasetPower=imageImport.DATASET_POWER,
           workers=8, log=print, stop=None, onEval=None):
     # k-fold cross-validation with a fresh model per fold, nothing is saved
     scores = []
@@ -130,7 +114,7 @@ def kfold(k=3, lr=0.001, minutes=10, batchSize=64, datasetPower=imageImport.DATA
             break
         log(f"Fold {i + 1}/{k}")
         # the held-out fold is big, so only check it at the end
-        history = train(trainLoader, foldLoader, lr=lr, minutes=minutes, evalEvery=10 ** 9, path=None,
+        history = train(trainLoader, foldLoader, lr=lr, epoch=epoch, evalEvery=10 ** 9, path=None,
                         log=log, stop=stop, onEval=(lambda e, i=i: onEval({**e, "fold": i})) if onEval else None)
         if stop is not None and stop.is_set():
             log("Stopped, this fold was cut short so its score isn't counted")
