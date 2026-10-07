@@ -1,17 +1,8 @@
 import sys
 from os import path
-import random
-import filetype
+from PIL import Image
 import imageImport
-
-def lookup(x):
-    if x < 1 or x > 35:
-        print("Invalid input")
-        return -1
-    if x > 26 and x <= 35:
-        return str(x - 26)
-    else:
-        return chr(ord('@')+x)
+import train
 
 def safe_read(numbytes):
     value = input()
@@ -20,47 +11,71 @@ def safe_read(numbytes):
 def modify_param():
     print("What would you like to change the value to?")
     x = safe_read(8)
+    try:
+        x = float(x)
+    except ValueError:
+        print("Value is not a number, exiting")
+        exit(1)
     print("Value successfully changed. New value: ", x)
     return x
 
+def load_model():
+    if not path.isfile(train.CHECKPOINT):
+        print("No trained model found, run -tr first")
+        exit(1)
+    return train.load(train.CHECKPOINT)
+
+def run_training(lr, minutes):
+    print("Training...")
+    trainLoader, validLoader, _ = imageImport.load_data()
+    train.train(trainLoader, validLoader, lr=lr, minutes=minutes)
+    print(f"parameters were:\nLearning Rate: {lr}\nMinutes: {minutes}\nOptimizer: Adam")
+
+def run_evaluation(split):
+    model = load_model()
+    # worker processes are only used for training
+    _, validLoader, testLoader = imageImport.load_data(num_workers=0)
+    loader = validLoader if split == "validation" else testLoader
+    loss, acc, perClass, confusion = train.evaluate(model, loader, train.getDevice())
+    print(f"{split} loss: {loss:.3f}  accuracy: {acc:.3f}")
+    print("per-class accuracy:")
+    print("  ".join(f"{imageImport.CLASSES[i]}:{a:.2f}" for i, a in enumerate(perClass) if a is not None))
+    print("most common mistakes (true -> predicted):")
+    print("  ".join(f"{t}->{p}:{c}" for t, p, c in train.top_confusions(confusion)))
+
 def start_learning(cmd, filepath = "N/A"):
     # hyperparameters here for some reason, can/will change
-    lr = 0.01
-    epoch = 10
-    momentum = 0.5
+    lr = 0.001
+    minutes = 10
     match cmd.lower():
         case "-m":
-            print("What hyperparameter are you trying to modify?\n [L]earing Rate, [E]poch, or [M]omentum")
+            print("What hyperparameter are you trying to modify?\n [L]earing Rate or [M]inutes of training")
             x = safe_read(1)
             match x:
                 case 'l':
                     lr = modify_param()
-                case 'e':
-                    epoch = modify_param()
                 case 'm':
-                    momentum = modify_param()
+                    minutes = modify_param()
                 case _:
                     print("Incorrect value given, exiting")
                     exit(1)
+            run_training(lr, minutes)
         case "-t":
             print("Testing...")
-
-            #call cnn with testing data
-
-            exit(1)
+            run_evaluation("test")
         case "-tr":
-            print("Training...")
-
-            #call cnn with training data
-
-            exit(1)
+            run_training(lr, minutes)
         case "-v":
             print("Validating...")
-
-            # call cnn with validation data
-
-            print(f"parameters were:\nLearning Rate: {lr}\nEpoch: {epoch}\nMomentum: {momentum}")
-            exit(1)
+            run_evaluation("validation")
+        case "-k":
+            print("K-fold cross-validation (3 folds)...")
+            train.kfold(k=3, lr=lr, minutes=minutes)
+        case "-p":
+            if not path.isfile(train.CHECKPOINT):
+                print("No trained model found, run -tr first")
+                exit(1)
+            print("Learning curves saved to", train.plot_history(train.CHECKPOINT))
         case "-r":
             if filepath == "N/A":
                 print("no picture given, exiting.")
@@ -68,36 +83,33 @@ def start_learning(cmd, filepath = "N/A"):
             elif path.isfile(filepath) is False:
                 print("Path given is not a file, exiting")
                 exit(1)
-            elif filetype.is_image(filepath) is False:
+            try:
+                Image.open(filepath).verify()
+            except Exception:
                 print("Not an image, exiting")
                 exit(1)
             print("Determining Input...")
-            
-            #call cnn with path provided
-            
-            #temp to compile
-            a = lookup(int(random.random() * 34) + 1)
 
-            print("Character associated with value given is", a)
+            character, confidence = train.predict(load_model(), filepath)
+
+            print(f"Character associated with value given is {character} ({confidence:.0%} confident)")
         case _:
             print("Unknown Command, exiting")
             exit(1)
-    exit(1)
 
 def __main__():
-    if sys.argv[1] is None:
+    if len(sys.argv) < 2:
         print("No command giving, exiting")
         exit(1)
-    if sys.argv[1].lower() == "-r" and sys.argv[2] is None:
+    if sys.argv[1].lower() == "-r" and len(sys.argv) < 3:
         print("no file path given, exiting")
         exit(1)
-    if len(sys.argv) >= 2 and not(sys.argv[1] == "-r" and len(sys.argv) >= 3):
+    if len(sys.argv) > 2 and not(sys.argv[1] == "-r" and len(sys.argv) == 3):
         print("More arguments provided than is necessary, ignoring excess arguments")
     if sys.argv[1] == "-r":
         start_learning(sys.argv[1], sys.argv[2])
     else:
         start_learning(sys.argv[1])
-    exit(1)
 
 if __name__ == "__main__":
     __main__()
