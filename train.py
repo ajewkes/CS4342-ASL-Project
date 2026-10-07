@@ -14,8 +14,7 @@ def getDevice():
 
 
 def evaluate(model, loader, dev):
-    # returns (loss, accuracy, per-class accuracy as a list with None for classes
-    # not in the data, confusion matrix [true class, predicted class])
+    # returns loss, accuracy, per-class accuracy and a confusion matrix
     model.eval()
     lossFn = nn.CrossEntropyLoss(reduction="sum")
     loss, total, correct = 0.0, 0, 0
@@ -36,7 +35,7 @@ def evaluate(model, loader, dev):
 
 
 def top_confusions(confusion, n=5):
-    # most common mistakes as (true char, predicted char, count)
+    # most common mistakes as (true, predicted, count)
     wrong = confusion.clone()
     wrong.fill_diagonal_(0)
     counts, flat = wrong.flatten().topk(n)
@@ -58,10 +57,7 @@ def load(path=CHECKPOINT, dev=None):
 
 
 def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT):
-    # Adam, runs until the time budget is up (not a fixed number of epochs),
-    # checking validation every evalEvery steps and keeping the best weights.
-    # path=None skips saving (used by k-fold). Returns the history, one entry
-    # per validation check: {step, epoch, seconds, trainLoss, valLoss, valAcc}
+    # trains with Adam until time runs out and keeps the best weights (path=None skips saving)
     torch.manual_seed(seed)
     dev = getDevice()
     model = CNN().to(dev)
@@ -76,8 +72,7 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
     while True:
         for x, y in trainLoader:
             if start is None:
-                # the clock starts once the first batch is ready, loader worker
-                # start-up (tens of seconds on Windows) isn't training time
+                # start the clock after the first batch so loader start-up doesn't count
                 start = time.time()
                 deadline = start + minutes * 60
             model.train()
@@ -104,7 +99,7 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
                         save(bestState, path, valAcc=vAcc, step=step, lr=lr, history=history)
             if timeUp:
                 if path:
-                    # rewrite so the saved history covers the whole run, not just up to the best step
+                    # save again so the history covers the whole run
                     save(bestState, path, valAcc=best, step=history[-1]["step"], lr=lr, history=history)
                     print(f"Time budget reached. Best validation accuracy {best:.3f}, saved to {path}")
                 else:
@@ -113,13 +108,11 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
 
 
 def kfold(k=3, lr=0.001, minutes=10):
-    # k-fold cross-validation over the combined training data: a fresh model per
-    # fold, scored on its held-out fold once at the end. This estimates how well
-    # the setup generalises, nothing is saved. minutes is per fold
+    # k-fold cross-validation with a fresh model per fold, nothing is saved
     scores = []
     for i, (trainLoader, foldLoader) in enumerate(imageImport.kfold_loaders(k)):
         print(f"Fold {i + 1}/{k}")
-        # the held-out fold is large, so only check it once when time is up
+        # the held-out fold is big, so only check it at the end
         history = train(trainLoader, foldLoader, lr=lr, minutes=minutes, evalEvery=10 ** 9, path=None)
         scores.append(history[-1]["valAcc"])
     mean = sum(scores) / k
@@ -130,7 +123,7 @@ def kfold(k=3, lr=0.001, minutes=10):
 
 
 def plot_history(path=CHECKPOINT, out="history.png"):
-    # learning curves from the history stored in the checkpoint
+    # plots the training history saved in the checkpoint
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

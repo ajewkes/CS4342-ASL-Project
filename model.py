@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 
-NUM_CLASSES = 36  # 0-9 then A-Z, matches imageImport.CLASSES
+NUM_CLASSES = 36  # 0-9 then A-Z
 
 
 class CNN(nn.Module):
-    # [N, 1, 28, 28] -> [N, 36] raw scores (no softmax, CrossEntropyLoss applies it)
+    # [N, 1, 28, 28] in, [N, 36] scores out
     def __init__(self, numClasses=NUM_CLASSES, dropout=0.4):
         super().__init__()
 

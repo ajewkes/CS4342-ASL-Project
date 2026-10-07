@@ -33,7 +33,7 @@ def run_training(lr, minutes):
 
 def run_evaluation(split):
     model = load_model()
-    # worker processes are only used for training
+    # workers are only needed for training
     _, validLoader, testLoader = imageImport.load_data(num_workers=0)
     loader = validLoader if split == "validation" else testLoader
     loss, acc, perClass, confusion = train.evaluate(model, loader, train.getDevice())
