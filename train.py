@@ -56,8 +56,9 @@ def load(path=CHECKPOINT, dev=None):
     return model
 
 
-def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT):
-    # trains with Adam until time runs out and keeps the best weights (path=None skips saving)
+def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT,
+          log=print, stop=None, onEval=None):
+    # trains with Adam until time runs out or stop is set, keeps the best weights (path=None skips saving)
     torch.manual_seed(seed)
     dev = getDevice()
     model = CNN().to(dev)
@@ -68,7 +69,7 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
     step, best, bestState = 0, -1.0, None
     history = []
     start = deadline = None
-    print(f"Training on {dev} for up to {minutes} minutes (Adam, lr={lr})")
+    log(f"Training on {dev} for up to {minutes} minutes (Adam, lr={lr})")
     while True:
         for x, y in trainLoader:
             if start is None:
@@ -83,42 +84,56 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
             optimizer.step()
             step += 1
 
-            timeUp = time.time() >= deadline
+            stopped = stop is not None and stop.is_set()
+            timeUp = stopped or time.time() >= deadline
             if step % evalEvery == 0 or timeUp:
                 vLoss, vAcc, _, _ = evaluate(model, validLoader, dev)
                 epochs = step * batch / len(trainLoader.dataset)
                 elapsed = time.time() - start
-                print(f"step {step:5d} epoch {epochs:4.2f} {elapsed:5.0f}s  "
-                      f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
+                log(f"step {step:5d} epoch {epochs:4.2f} {elapsed:5.0f}s  "
+                    f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
                 history.append({"step": step, "epoch": epochs, "seconds": elapsed,
                                 "trainLoss": loss.item(), "valLoss": vLoss, "valAcc": vAcc})
+                if onEval:
+                    onEval(history[-1])
                 if vAcc > best:
                     best = vAcc
                     bestState = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     if path:
                         save(bestState, path, valAcc=vAcc, step=step, lr=lr, history=history)
             if timeUp:
+                reason = "Stopped" if stopped else "Time budget reached"
                 if path:
                     # save again so the history covers the whole run
                     save(bestState, path, valAcc=best, step=history[-1]["step"], lr=lr, history=history)
-                    print(f"Time budget reached. Best validation accuracy {best:.3f}, saved to {path}")
+                    log(f"{reason}. Best validation accuracy {best:.3f}, saved to {path}")
                 else:
-                    print(f"Time budget reached. Final validation accuracy {history[-1]['valAcc']:.3f}")
+                    log(f"{reason}. Final validation accuracy {history[-1]['valAcc']:.3f}")
                 return history
 
 
-def kfold(k=3, lr=0.001, minutes=10):
+def kfold(k=3, lr=0.001, minutes=10, batchSize=64, datasetPower=imageImport.DATASET_POWER,
+          workers=8, log=print, stop=None, onEval=None):
     # k-fold cross-validation with a fresh model per fold, nothing is saved
     scores = []
-    for i, (trainLoader, foldLoader) in enumerate(imageImport.kfold_loaders(k)):
-        print(f"Fold {i + 1}/{k}")
+    folds = imageImport.kfold_loaders(k, batchSize, num_workers=workers, datasetPower=datasetPower)
+    for i, (trainLoader, foldLoader) in enumerate(folds):
+        if stop is not None and stop.is_set():
+            break
+        log(f"Fold {i + 1}/{k}")
         # the held-out fold is big, so only check it at the end
-        history = train(trainLoader, foldLoader, lr=lr, minutes=minutes, evalEvery=10 ** 9, path=None)
+        history = train(trainLoader, foldLoader, lr=lr, minutes=minutes, evalEvery=10 ** 9, path=None,
+                        log=log, stop=stop, onEval=(lambda e, i=i: onEval({**e, "fold": i})) if onEval else None)
+        if stop is not None and stop.is_set():
+            log("Stopped, this fold was cut short so its score isn't counted")
+            break
         scores.append(history[-1]["valAcc"])
-    mean = sum(scores) / k
-    spread = (sum((s - mean) ** 2 for s in scores) / k) ** 0.5
-    print("fold accuracies: " + ", ".join(f"{s:.3f}" for s in scores))
-    print(f"mean {mean:.3f} +/- {spread:.3f}")
+    if not scores:
+        return scores
+    mean = sum(scores) / len(scores)
+    spread = (sum((s - mean) ** 2 for s in scores) / len(scores)) ** 0.5
+    log("fold accuracies: " + ", ".join(f"{s:.3f}" for s in scores))
+    log(f"mean {mean:.3f} +/- {spread:.3f}")
     return scores
 
 
