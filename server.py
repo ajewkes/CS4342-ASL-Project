@@ -62,9 +62,11 @@ def run(params):
     state, error = "done", None
     try:
         if params["mode"] == "train":
+            with lock:
+                started = job["started"]
             trainLoader, validLoader, _ = imageImport.load_data(params["batchSize"], params["workers"], params["datasetPower"])
             train.train(trainLoader, validLoader, lr=params["lr"], minutes=params["minutes"],
-                        evalEvery=params["evalEvery"], log=log, stop=stopEvent, onEval=onEval)
+                        evalEvery=params["evalEvery"], log=log, stop=stopEvent, onEval=onEval, startTime=started)
         else:
             scores = train.kfold(k=params["k"], lr=params["lr"], minutes=params["minutes"],
                                  batchSize=params["batchSize"], datasetPower=params["datasetPower"],

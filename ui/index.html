@@ -42,6 +42,7 @@
   .seg input:checked + label { background: var(--accent); color: #fff; }
   .seg input:focus-visible + label { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
 
+  .mode-hint { font-size: 12px; color: var(--muted); margin: -6px 0 18px; }
   .field { margin-bottom: 14px; }
   .field label { display: flex; justify-content: space-between; font-size: 13px; color: var(--text); margin-bottom: 5px; }
   .field .hint { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
@@ -105,36 +106,42 @@
         <input type="radio" name="mode" id="mode-train" value="train" checked><label for="mode-train">Train model</label>
         <input type="radio" name="mode" id="mode-kfold" value="kfold"><label for="mode-kfold">K-fold check</label>
       </div>
+      <p class="mode-hint" id="mode-hint"></p>
 
       <div class="field">
         <label for="lr">Learning rate (Adam)</label>
         <input type="number" id="lr" step="any">
+        <span class="hint">How big a step Adam takes on each update. Too high and the loss jumps around, too low and learning is slow. 0.001 is a safe start.</span>
       </div>
       <div class="field">
         <label for="minutes"><span id="minutes-label">Training minutes</span></label>
         <input type="number" id="minutes" step="any">
+        <span class="hint" id="minutes-hint"></span>
       </div>
       <div class="field">
         <label for="batchSize">Batch size</label>
         <input type="number" id="batchSize" step="1">
+        <span class="hint">Images used for each update. Bigger batches are smoother and use more memory, smaller ones update more often.</span>
       </div>
       <div class="field">
         <label for="datasetPower">Dataset weighting <span class="val" id="power-val"></span></label>
         <input type="range" id="datasetPower" min="0" max="1" step="0.05">
-        <span class="hint">0 gives every dataset an equal share, 1 keeps the natural sizes. The biggest dataset always leads.</span>
+        <span class="hint">How evenly the three training datasets are sampled. 0 gives each an equal share, 1 keeps their natural sizes, 0.5 is in between. The biggest dataset always leads.</span>
       </div>
       <div class="field" id="row-evalEvery">
         <label for="evalEvery">Check validation every (steps)</label>
         <input type="number" id="evalEvery" step="1">
+        <span class="hint">How often the model is scored on the validation set. The best score so far is saved as model.pt. Checking more often gives a finer chart, but each check takes a few seconds.</span>
       </div>
       <div class="field" id="row-k" hidden>
         <label for="k">Folds</label>
         <input type="number" id="k" step="1">
-        <span class="hint">Minutes apply to each fold, so the total is minutes x folds. Nothing is saved.</span>
+        <span class="hint">How many parts the training data is split into. Each part is held out once while a fresh model trains on the rest. More folds give a steadier estimate but take longer.</span>
       </div>
       <div class="field">
         <label for="workers">Loader workers</label>
         <input type="number" id="workers" step="1">
+        <span class="hint">Background processes that load images. More is faster once running but slower to start, about 5 seconds each on Windows. 0 loads in the main process.</span>
       </div>
 
       <div class="buttons">
@@ -198,6 +205,12 @@ function syncMode() {
   $("row-evalEvery").hidden = kfold;
   $("row-k").hidden = !kfold;
   $("minutes-label").textContent = kfold ? "Minutes per fold" : "Training minutes";
+  $("minutes-hint").textContent = kfold
+    ? "Time limit for each fold, including loader start-up and its final check. The total is minutes x folds."
+    : "Time limit for the whole run, including loader start-up and the final validation check. Training stops when time is up, not after a set number of passes.";
+  $("mode-hint").textContent = kfold
+    ? "Trains a fresh model on each fold to estimate how well this setup generalises. Nothing is saved."
+    : "Trains one model on all the training data and saves the best version as model.pt.";
   $("start").textContent = kfold ? "Start k-fold" : "Start training";
 }
 

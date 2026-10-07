@@ -56,9 +56,16 @@ def load(path=CHECKPOINT, dev=None):
     return model
 
 
+def evalEstimate(loader):
+    # rough seconds for one validation pass, used until a real one has been timed
+    workers = loader.num_workers
+    return len(loader.dataset) * (0.0005 if workers else 0.002) + 5 * workers
+
+
 def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT,
-          log=print, stop=None, onEval=None):
+          log=print, stop=None, onEval=None, startTime=None):
     # trains with Adam until time runs out or stop is set, keeps the best weights (path=None skips saving)
+    # the whole run, loader start-up and final validation included, fits in the time budget
     torch.manual_seed(seed)
     dev = getDevice()
     model = CNN().to(dev)
@@ -68,14 +75,12 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
     batch = trainLoader.batch_size
     step, best, bestState = 0, -1.0, None
     history = []
-    start = deadline = None
-    log(f"Training on {dev} for up to {minutes} minutes (Adam, lr={lr})")
+    begin = startTime or time.time()
+    deadline = begin + minutes * 60
+    evalCost = evalEstimate(validLoader)
+    log(f"Training on {dev} for up to {minutes} minutes in total (Adam, lr={lr})")
     while True:
         for x, y in trainLoader:
-            if start is None:
-                # start the clock after the first batch so loader start-up doesn't count
-                start = time.time()
-                deadline = start + minutes * 60
             model.train()
             x, y = x.to(dev), y.to(dev)
             optimizer.zero_grad()
@@ -85,11 +90,14 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
             step += 1
 
             stopped = stop is not None and stop.is_set()
-            timeUp = stopped or time.time() >= deadline
+            # stop early enough to leave room for the final validation pass
+            timeUp = stopped or time.time() >= deadline - evalCost
             if step % evalEvery == 0 or timeUp:
+                evalStart = time.time()
                 vLoss, vAcc, _, _ = evaluate(model, validLoader, dev)
+                evalCost = time.time() - evalStart
                 epochs = step * batch / len(trainLoader.dataset)
-                elapsed = time.time() - start
+                elapsed = time.time() - begin
                 log(f"step {step:5d} epoch {epochs:4.2f} {elapsed:5.0f}s  "
                     f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
                 history.append({"step": step, "epoch": epochs, "seconds": elapsed,
