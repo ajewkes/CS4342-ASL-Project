@@ -4,13 +4,22 @@ from torch import nn
 from PIL import Image
 
 import imageImport
-from model import CNN, NUM_CLASSES
+from model import CNN, NUM_CLASSES, IMAGE_SIZE
 
 CHECKPOINT = "model.pt"
+EPOCHS = 5
+
+# a saved model has to beat twice the chance rate on validation before it is used for predictions
+MIN_VAL_ACC = 2 / NUM_CLASSES
 
 
 def getDevice():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # an NVIDIA GPU, else an Apple-silicon GPU, else the CPU
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def evaluate(model, loader, dev):
@@ -44,42 +53,70 @@ def top_confusions(confusion, n=5):
 
 
 def save(state, path, **meta):
-    torch.save({"model": state, "classes": imageImport.CLASSES, **meta}, path)
+    torch.save({"model": state, "classes": imageImport.CLASSES, "imageSize": IMAGE_SIZE, **meta}, path)
 
 
-def load(path=CHECKPOINT, dev=None):
+def readCheckpoint(path=CHECKPOINT):
+    return torch.load(path, map_location="cpu")
+
+
+def wrongSize(saved):
+    # checkpoints from before the size was stored are 28x28
+    size = saved.get("imageSize", 28)
+    if size != IMAGE_SIZE:
+        return f"The saved model was trained on {size}x{size} images but the model now uses {IMAGE_SIZE}x{IMAGE_SIZE}. Train it again."
+    return None
+
+
+def notUsable(saved):
+    # why a checkpoint can't be used for predictions yet, or None when it can
+    # the last save of a run marks it finished, older checkpoints have no mark and are trusted
+    if wrongSize(saved):
+        return wrongSize(saved)
+    if not saved.get("finished", True):
+        return ("The saved model is from a training run that hasn't finished (it is still running or was cut off). "
+                "Predictions open once a run finishes.")
+    valAcc = saved.get("valAcc")
+    if valAcc is not None and valAcc < MIN_VAL_ACC:
+        return (f"The saved model scored {valAcc:.1%} on validation, no better than guessing "
+                f"({1 / NUM_CLASSES:.1%} for {NUM_CLASSES} classes). Train it for longer.")
+    return None
+
+
+def fromCheckpoint(saved, dev=None):
+    if wrongSize(saved):
+        raise RuntimeError(wrongSize(saved))
     dev = dev or getDevice()
-    checkpoint = torch.load(path, map_location=dev)
     model = CNN().to(dev)
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(saved["model"])
     model.eval()
     return model
 
 
-def evalEstimate(loader):
-    # rough seconds for one validation pass, used until a real one has been timed
-    workers = loader.num_workers
-    return len(loader.dataset) * (0.0005 if workers else 0.002) + 5 * workers
+def load(path=CHECKPOINT, dev=None):
+    return fromCheckpoint(readCheckpoint(path), dev)
 
 
-def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0, path=CHECKPOINT,
-          log=print, stop=None, onEval=None, startTime=None):
-    # trains with Adam until time runs out or stop is set, keeps the best weights (path=None skips saving)
-    # the whole run, loader start-up and final validation included, fits in the time budget
+def train(trainLoader, validLoader, lr=0.001, epochs=EPOCHS, evalEvery=500, seed=0, path=CHECKPOINT,
+          log=print, stop=None, onEval=None, onProgress=None):
+    # trains with Adam for a number of epochs or until stop is set, keeps the best weights (path=None skips saving)
+    # validates every evalEvery steps and once at the end, onProgress(step, total) reports how far along it is
     torch.manual_seed(seed)
     dev = getDevice()
     model = CNN().to(dev)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     lossFn = nn.CrossEntropyLoss()
 
-    batch = trainLoader.batch_size
+    perEpoch = len(trainLoader)
+    total = epochs * perEpoch
     step, best, bestState = 0, -1.0, None
     history = []
-    begin = startTime or time.time()
-    deadline = begin + minutes * 60
-    evalCost = evalEstimate(validLoader)
-    log(f"Training on {dev} for up to {minutes} minutes in total (Adam, lr={lr})")
-    while True:
+    begin = time.time()
+    log(f"Training on {dev} for {epochs} epochs of {perEpoch} steps (Adam, lr={lr})")
+    if onProgress:
+        onProgress(0, total)
+    stopped = False
+    while not stopped and step < total:
         for x, y in trainLoader:
             model.train()
             x, y = x.to(dev), y.to(dev)
@@ -90,17 +127,15 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
             step += 1
 
             stopped = stop is not None and stop.is_set()
-            # stop early enough to leave room for the final validation pass
-            timeUp = stopped or time.time() >= deadline - evalCost
-            if step % evalEvery == 0 or timeUp:
-                evalStart = time.time()
+            last = stopped or step == total
+            if onProgress and (step % 10 == 0 or last):
+                onProgress(step, total)
+            if step % evalEvery == 0 or last:
                 vLoss, vAcc, _, _ = evaluate(model, validLoader, dev)
-                evalCost = time.time() - evalStart
-                epochs = step * batch / len(trainLoader.dataset)
                 elapsed = time.time() - begin
-                log(f"step {step:5d} epoch {epochs:4.2f} {elapsed:5.0f}s  "
+                log(f"step {step:5d} epoch {step / perEpoch:4.2f} {elapsed:5.0f}s  "
                     f"train loss {loss.item():.3f}  val loss {vLoss:.3f}  val acc {vAcc:.3f}")
-                history.append({"step": step, "epoch": epochs, "seconds": elapsed,
+                history.append({"step": step, "epoch": step / perEpoch, "seconds": elapsed,
                                 "trainLoss": loss.item(), "valLoss": vLoss, "valAcc": vAcc})
                 if onEval:
                     onEval(history[-1])
@@ -108,20 +143,22 @@ def train(trainLoader, validLoader, lr=0.001, minutes=10, evalEvery=500, seed=0,
                     best = vAcc
                     bestState = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     if path:
-                        save(bestState, path, valAcc=vAcc, step=step, lr=lr, history=history)
-            if timeUp:
-                reason = "Stopped" if stopped else "Time budget reached"
-                if path:
-                    # save again so the history covers the whole run
-                    save(bestState, path, valAcc=best, step=history[-1]["step"], lr=lr, history=history)
-                    log(f"{reason}. Best validation accuracy {best:.3f}, saved to {path}")
-                else:
-                    log(f"{reason}. Final validation accuracy {history[-1]['valAcc']:.3f}")
-                return history
+                        save(bestState, path, valAcc=vAcc, step=step, lr=lr, epochs=epochs, history=history, finished=False)
+            if last:
+                break
+
+    reason = "Stopped" if stopped else f"Finished {epochs} epochs"
+    if path:
+        # save again so the history covers the whole run, and mark the model ready for predictions
+        save(bestState, path, valAcc=best, step=history[-1]["step"], lr=lr, epochs=epochs, history=history, finished=True)
+        log(f"{reason}. Best validation accuracy {best:.3f}, saved to {path}")
+    else:
+        log(f"{reason}. Final validation accuracy {history[-1]['valAcc']:.3f}")
+    return history
 
 
-def kfold(k=3, lr=0.001, minutes=10, batchSize=64, datasetPower=imageImport.DATASET_POWER,
-          workers=8, log=print, stop=None, onEval=None):
+def kfold(k=3, lr=0.001, epochs=EPOCHS, batchSize=64, datasetPower=imageImport.DATASET_POWER,
+          workers=8, log=print, stop=None, onEval=None, onProgress=None):
     # k-fold cross-validation with a fresh model per fold, nothing is saved
     scores = []
     folds = imageImport.kfold_loaders(k, batchSize, num_workers=workers, datasetPower=datasetPower)
@@ -130,8 +167,9 @@ def kfold(k=3, lr=0.001, minutes=10, batchSize=64, datasetPower=imageImport.DATA
             break
         log(f"Fold {i + 1}/{k}")
         # the held-out fold is big, so only check it at the end
-        history = train(trainLoader, foldLoader, lr=lr, minutes=minutes, evalEvery=10 ** 9, path=None,
-                        log=log, stop=stop, onEval=(lambda e, i=i: onEval({**e, "fold": i})) if onEval else None)
+        history = train(trainLoader, foldLoader, lr=lr, epochs=epochs, evalEvery=10 ** 9, path=None, log=log, stop=stop,
+                        onEval=(lambda e, i=i: onEval({**e, "fold": i})) if onEval else None,
+                        onProgress=(lambda s, t, i=i: onProgress(s, t, i)) if onProgress else None)
         if stop is not None and stop.is_set():
             log("Stopped, this fold was cut short so its score isn't counted")
             break
@@ -169,12 +207,36 @@ def plot_history(path=CHECKPOINT, out="history.png"):
     return out
 
 
-def predict(model, imagePath, dev=None):
-    # one image -> (character, confidence)
-    dev = dev or getDevice()
-    image = Image.open(imagePath).convert("RGB")
-    x = imageImport.evalStandard(image).unsqueeze(0).to(dev)
+def flatten(image):
+    # RGB image, with any transparent background filled white rather than black
+    image = image.convert("RGBA") if image.mode in ("P", "LA") or "transparency" in image.info else image
+    if image.mode == "RGBA":
+        white = Image.new("RGBA", image.size, "white")
+        return Image.alpha_composite(white, image).convert("RGB")
+    return image.convert("RGB")
+
+
+def predictImage(model, image, dev=None, top=3):
+    # PIL image -> [(character, confidence), ...] best first, look-alike pairs are joined as "O / 0"
+    dev = dev or next(model.parameters()).device
+    x = imageImport.evalStandard(flatten(image)).unsqueeze(0).to(dev)
     with torch.no_grad():
-        probs = torch.softmax(model(x), dim=1)[0]
-    idx = probs.argmax().item()
-    return imageImport.CLASSES[idx], probs[idx].item()
+        probs = torch.softmax(model(x), dim=1)[0].tolist()
+    scores = dict(zip(imageImport.CLASSES, probs))
+    for a, b in imageImport.LOOKALIKES:
+        scores[f"{a} / {b}"] = scores.pop(a) + scores.pop(b)
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top]
+
+
+def lookalikeAccuracy(confusion):
+    # accuracy when mixing up a look-alike pair counts as correct
+    right = confusion.diag().sum().item()
+    for a, b in imageImport.LOOKALIKES:
+        i, j = imageImport.CLASS_TO_IDX[a], imageImport.CLASS_TO_IDX[b]
+        right += confusion[i, j].item() + confusion[j, i].item()
+    return right / confusion.sum().item()
+
+
+def predict(model, imagePath, dev=None):
+    # one image file -> (character, confidence)
+    return predictImage(model, Image.open(imagePath), dev, top=1)[0]

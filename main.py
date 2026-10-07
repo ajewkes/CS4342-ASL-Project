@@ -19,17 +19,41 @@ def modify_param():
     print("Value successfully changed. New value: ", x)
     return x
 
+def modify_epochs():
+    # epochs have to be a whole number of at least 1
+    x = modify_param()
+    if x != int(x) or x < 1:
+        print("Epochs must be a whole number of at least 1, exiting")
+        exit(1)
+    return int(x)
+
 def load_model():
     if not path.isfile(train.CHECKPOINT):
         print("No trained model found, run -tr first")
         exit(1)
-    return train.load(train.CHECKPOINT)
+    saved = train.readCheckpoint(train.CHECKPOINT)
+    if train.wrongSize(saved):
+        print(train.wrongSize(saved))
+        exit(1)
+    return train.fromCheckpoint(saved)
 
-def run_training(lr, minutes):
+def load_finished_model():
+    # predictions only use a model whose training run has finished and that beats guessing
+    if not path.isfile(train.CHECKPOINT):
+        print("No trained model found, run -tr first")
+        exit(1)
+    saved = train.readCheckpoint(train.CHECKPOINT)
+    problem = train.notUsable(saved)
+    if problem:
+        print(problem)
+        exit(1)
+    return train.fromCheckpoint(saved)
+
+def run_training(lr, epochs):
     print("Training...")
     trainLoader, validLoader, _ = imageImport.load_data()
-    train.train(trainLoader, validLoader, lr=lr, minutes=minutes)
-    print(f"parameters were:\nLearning Rate: {lr}\nMinutes: {minutes}\nOptimizer: Adam")
+    train.train(trainLoader, validLoader, lr=lr, epochs=epochs)
+    print(f"parameters were:\nLearning Rate: {lr}\nEpochs: {epochs}\nOptimizer: Adam")
 
 def run_evaluation(split):
     model = load_model()
@@ -37,7 +61,9 @@ def run_evaluation(split):
     _, validLoader, testLoader = imageImport.load_data(num_workers=0)
     loader = validLoader if split == "validation" else testLoader
     loss, acc, perClass, confusion = train.evaluate(model, loader, train.getDevice())
-    print(f"{split} loss: {loss:.3f}  accuracy: {acc:.3f}")
+    print(f"{split} loss: {loss:.3f}  accuracy: {acc:.3f}  "
+          f"(look-alike pairs {', '.join(x + '/' + y for x, y in imageImport.LOOKALIKES)} counted as one: "
+          f"{train.lookalikeAccuracy(confusion):.3f})")
     print("per-class accuracy:")
     print("  ".join(f"{imageImport.CLASSES[i]}:{a:.2f}" for i, a in enumerate(perClass) if a is not None))
     print("most common mistakes (true -> predicted):")
@@ -46,31 +72,31 @@ def run_evaluation(split):
 def start_learning(cmd, filepath = "N/A"):
     # hyperparameters here for some reason, can/will change
     lr = 0.001
-    minutes = 10
+    epochs = train.EPOCHS
     match cmd.lower():
         case "-m":
-            print("What hyperparameter are you trying to modify?\n [L]earing Rate or [M]inutes of training")
+            print("What hyperparameter are you trying to modify?\n [L]earing Rate or [E]pochs of training")
             x = safe_read(1)
             match x:
                 case 'l':
                     lr = modify_param()
-                case 'm':
-                    minutes = modify_param()
+                case 'e':
+                    epochs = modify_epochs()
                 case _:
                     print("Incorrect value given, exiting")
                     exit(1)
-            run_training(lr, minutes)
+            run_training(lr, epochs)
         case "-t":
             print("Testing...")
             run_evaluation("test")
         case "-tr":
-            run_training(lr, minutes)
+            run_training(lr, epochs)
         case "-v":
             print("Validating...")
             run_evaluation("validation")
         case "-k":
             print("K-fold cross-validation (3 folds)...")
-            train.kfold(k=3, lr=lr, minutes=minutes)
+            train.kfold(k=3, lr=lr, epochs=epochs)
         case "-p":
             if not path.isfile(train.CHECKPOINT):
                 print("No trained model found, run -tr first")
@@ -90,7 +116,7 @@ def start_learning(cmd, filepath = "N/A"):
                 exit(1)
             print("Determining Input...")
 
-            character, confidence = train.predict(load_model(), filepath)
+            character, confidence = train.predict(load_finished_model(), filepath)
 
             print(f"Character associated with value given is {character} ({confidence:.0%} confident)")
         case _:

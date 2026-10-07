@@ -5,6 +5,8 @@ from torchvision import transforms
 from torchvision import datasets
 from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSampler
 
+from model import IMAGE_SIZE
+
 # one label set for all datasets: 0-9 then A-Z
 CLASSES = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
@@ -12,23 +14,31 @@ CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
 # asl-hands names letters 0-25 instead of A-Z
 HANDS_TO_IDX = {str(i): CLASS_TO_IDX[chr(ord("A") + i)] for i in range(26)}
 
+# signs that use the same handshape, a still image can't tell them apart so predictions report them together
+LOOKALIKES = [("O", "0"), ("W", "6"), ("V", "2"), ("F", "9")]
+
 # dataset share of training samples is size**power, 1 is no weighting and 0 is equal shares
 DATASET_POWER = 0.5
+# extra factor on each training dataset's share, in load order (09az, asl-hands, synthetic numbers), 0 drops one
+# asl-hands is off: its hands are tiny or cut off at 28x28, and dropping it raised validation from 54% to 68%
+DATASET_SCALE = (1.0, 0.0, 1.0)
 
+# small tilts and random lighting so the model copes with different photos
 trainingStandard = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
-    transforms.Resize(28),
-    transforms.CenterCrop(28),
+    transforms.ColorJitter(brightness=0.4, contrast=0.4),
+    transforms.Resize(IMAGE_SIZE),
+    transforms.CenterCrop(IMAGE_SIZE),
     transforms.RandomRotation(10),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,)),
 ])
 
-# same as trainingStandard but without rotation
+# the plain version for validation, testing and predictions
 evalStandard = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
-    transforms.Resize(28),
-    transforms.CenterCrop(28),
+    transforms.Resize(IMAGE_SIZE),
+    transforms.CenterCrop(IMAGE_SIZE),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,)),
 ])
@@ -70,10 +80,10 @@ def makeLoader(dataset, batch_size, shuffle, num_workers, sampler=None):
                       num_workers=num_workers, persistent_workers=num_workers > 0)
 
 
-def datasetWeights(trainingSet, power=DATASET_POWER):
-    # per-sample weights that give each dataset a share of size**power, so big sets still lead
+def datasetWeights(trainingSet, power=DATASET_POWER, scale=None):
+    # per-sample weights that give each dataset a share of size**power times its scale, so big sets still lead
     sizes = [len(d) for d in trainingSet.datasets]
-    shares = [s ** power for s in sizes]
+    shares = [s ** power * f for s, f in zip(sizes, scale or DATASET_SCALE)]
     return torch.cat([torch.full((s,), share / sum(shares) / s, dtype=torch.double)
                       for s, share in zip(sizes, shares)])
 
