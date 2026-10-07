@@ -1,35 +1,115 @@
-from softmax_Start import Softmax
-from datapoint_generator import DataPoint2DGenerator
-from my_data import MyDataset
-import torch
-import numpy as np
-import argparse
+import sys
+from os import path
+from PIL import Image
+import imageImport
+import train
+
+def safe_read(numbytes):
+    value = input()
+    return value[:numbytes].lower()
+
+def modify_param():
+    print("What would you like to change the value to?")
+    x = safe_read(8)
+    try:
+        x = float(x)
+    except ValueError:
+        print("Value is not a number, exiting")
+        exit(1)
+    print("Value successfully changed. New value: ", x)
+    return x
+
+def load_model():
+    if not path.isfile(train.CHECKPOINT):
+        print("No trained model found, run -tr first")
+        exit(1)
+    return train.load(train.CHECKPOINT)
+
+def run_training(lr, minutes):
+    print("Training...")
+    trainLoader, validLoader, _ = imageImport.load_data()
+    train.train(trainLoader, validLoader, lr=lr, minutes=minutes)
+    print(f"parameters were:\nLearning Rate: {lr}\nMinutes: {minutes}\nOptimizer: Adam")
+
+def run_evaluation(split):
+    model = load_model()
+    # workers are only needed for training
+    _, validLoader, testLoader = imageImport.load_data(num_workers=0)
+    loader = validLoader if split == "validation" else testLoader
+    loss, acc, perClass, confusion = train.evaluate(model, loader, train.getDevice())
+    print(f"{split} loss: {loss:.3f}  accuracy: {acc:.3f}")
+    print("per-class accuracy:")
+    print("  ".join(f"{imageImport.CLASSES[i]}:{a:.2f}" for i, a in enumerate(perClass) if a is not None))
+    print("most common mistakes (true -> predicted):")
+    print("  ".join(f"{t}->{p}:{c}" for t, p, c in train.top_confusions(confusion)))
+
+def start_learning(cmd, filepath = "N/A"):
+    # hyperparameters here for some reason, can/will change
+    lr = 0.001
+    minutes = 10
+    match cmd.lower():
+        case "-m":
+            print("What hyperparameter are you trying to modify?\n [L]earing Rate or [M]inutes of training")
+            x = safe_read(1)
+            match x:
+                case 'l':
+                    lr = modify_param()
+                case 'm':
+                    minutes = modify_param()
+                case _:
+                    print("Incorrect value given, exiting")
+                    exit(1)
+            run_training(lr, minutes)
+        case "-t":
+            print("Testing...")
+            run_evaluation("test")
+        case "-tr":
+            run_training(lr, minutes)
+        case "-v":
+            print("Validating...")
+            run_evaluation("validation")
+        case "-k":
+            print("K-fold cross-validation (3 folds)...")
+            train.kfold(k=3, lr=lr, minutes=minutes)
+        case "-p":
+            if not path.isfile(train.CHECKPOINT):
+                print("No trained model found, run -tr first")
+                exit(1)
+            print("Learning curves saved to", train.plot_history(train.CHECKPOINT))
+        case "-r":
+            if filepath == "N/A":
+                print("no picture given, exiting.")
+                exit(1)
+            elif path.isfile(filepath) is False:
+                print("Path given is not a file, exiting")
+                exit(1)
+            try:
+                Image.open(filepath).verify()
+            except Exception:
+                print("Not an image, exiting")
+                exit(1)
+            print("Determining Input...")
+
+            character, confidence = train.predict(load_model(), filepath)
+
+            print(f"Character associated with value given is {character} ({confidence:.0%} confident)")
+        case _:
+            print("Unknown Command, exiting")
+            exit(1)
+
+def __main__():
+    if len(sys.argv) < 2:
+        print("No command giving, exiting")
+        exit(1)
+    if sys.argv[1].lower() == "-r" and len(sys.argv) < 3:
+        print("no file path given, exiting")
+        exit(1)
+    if len(sys.argv) > 2 and not(sys.argv[1] == "-r" and len(sys.argv) == 3):
+        print("More arguments provided than is necessary, ignoring excess arguments")
+    if sys.argv[1] == "-r":
+        start_learning(sys.argv[1], sys.argv[2])
+    else:
+        start_learning(sys.argv[1])
 
 if __name__ == "__main__":
-    #set seed
-    np.random.seed(0), torch.manual_seed(0)
-    #check for arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--train', type=int, default=0)
-    args = parser.arse_args()
-
-    #if train, train
-    if bool(args.train):
-
-        #no clue...
-        means = [[2., 2.], [-2., -2.], [-5., 6.]]
-        cov = [[1., 0.], [0., 1.]]
-
-        #no clue...
-        data_generator = DataPoint2DGenerator(means, cov)
-        data = data_generator.generate()
-        data_generator.display()
-
-        #create dataset object to rune softmax on
-        dataset = MyDataset(data[0], data[1])
-        soft_reg = Softmax(dataset, data_generator.n_class)
-        soft_reg.train()
-
-        # accuracy on train set
-        soft_reg.visualize()
-        print('Accuracy on train set: ', soft_reg.accuracy_on_train_set())
+    __main__()
