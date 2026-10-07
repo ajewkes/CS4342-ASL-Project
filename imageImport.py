@@ -3,7 +3,7 @@ import torch
 from kagglehub import *
 from torchvision import transforms
 from torchvision import datasets
-from torch.utils.data import ConcatDataset, DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSampler
 
 # one label set for all datasets: 0-9 then A-Z
 CLASSES = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -11,6 +11,9 @@ CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
 
 # asl-hands names letters 0-25 instead of A-Z
 HANDS_TO_IDX = {str(i): CLASS_TO_IDX[chr(ord("A") + i)] for i in range(26)}
+
+# dataset share of training samples is size**power, 1 is no weighting and 0 is equal shares
+DATASET_POWER = 0.5
 
 trainingStandard = transforms.Compose([
     transforms.Grayscale(num_output_channels=1),
@@ -61,13 +64,21 @@ def handsFolders(root, transform):
     return ConcatDataset([ASLFolder(p, transform=transform, names=HANDS_TO_IDX) for p in people])
 
 
-def makeLoader(dataset, batch_size, shuffle, num_workers):
+def makeLoader(dataset, batch_size, shuffle, num_workers, sampler=None):
     # worker processes speed up image loading
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle and sampler is None, sampler=sampler,
                       num_workers=num_workers, persistent_workers=num_workers > 0)
 
 
-def load_data(batch_size=64, num_workers=8):
+def datasetWeights(trainingSet, power=DATASET_POWER):
+    # per-sample weights that give each dataset a share of size**power, so big sets still lead
+    sizes = [len(d) for d in trainingSet.datasets]
+    shares = [s ** power for s in sizes]
+    return torch.cat([torch.full((s,), share / sum(shares) / s, dtype=torch.double)
+                      for s, share in zip(sizes, shares)])
+
+
+def load_data(batch_size=64, num_workers=8, datasetPower=DATASET_POWER):
     # downloads happen here, not on import
     #training set, 3 k-folds
     all = kagglehub.dataset_download("prathumarikeri/american-sign-language-09az")
@@ -87,8 +98,9 @@ def load_data(batch_size=64, num_workers=8):
 
     # combine the training sets and batch everything
     trainingSet = ConcatDataset([trainingDataAll, trainingDataAlphabet, trainingDataNums])
+    sampler = WeightedRandomSampler(datasetWeights(trainingSet, datasetPower), len(trainingSet), replacement=True)
     return (
-        makeLoader(trainingSet, batch_size, True, num_workers),
+        makeLoader(trainingSet, batch_size, True, num_workers, sampler),
         # small sets, so workers aren't worth it
         makeLoader(validationSet, batch_size, False, 0),
         makeLoader(testSet, batch_size, False, 0),
@@ -112,14 +124,16 @@ def kfold_indices(n, k=3, seed=0):
         yield [j for f in range(k) if f != held for j in folds[f]], folds[held]
 
 
-def kfold_loaders(k=3, batch_size=64, seed=0, num_workers=8):
-    # k-fold loaders, the training folds get rotation and the held-out fold doesn't
+def kfold_loaders(k=3, batch_size=64, seed=0, num_workers=8, datasetPower=DATASET_POWER):
+    # k-fold loaders, the training folds get rotation and weighting, the held-out fold doesn't
     augmented = trainingSets(trainingStandard)
     plain = trainingSets(evalStandard)
+    weights = datasetWeights(augmented, datasetPower)
 
     for trainIdx, foldIdx in kfold_indices(len(augmented), k, seed):
+        sampler = WeightedRandomSampler(weights[trainIdx], len(trainIdx), replacement=True)
         yield (
-            makeLoader(Subset(augmented, trainIdx), batch_size, True, num_workers),
+            makeLoader(Subset(augmented, trainIdx), batch_size, True, num_workers, sampler),
             makeLoader(Subset(plain, foldIdx), batch_size, False, num_workers),
         )
 
