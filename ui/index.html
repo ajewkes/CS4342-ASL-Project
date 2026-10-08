@@ -89,6 +89,27 @@
     border-radius: 9px; padding: 12px; font: 12.5px/1.55 ui-monospace, Consolas, monospace; color: #c4d2ff; white-space: pre-wrap;
   }
   .error-box { margin-top: 12px; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--bad); color: var(--bad); font-size: 13px; }
+
+  #try-card { margin-top: 18px; }
+  .try { display: grid; grid-template-columns: minmax(220px, 280px) 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 820px) { .try { grid-template-columns: 1fr; } }
+  .try.locked .frame, .try.locked .result { opacity: .45; }
+  .frame {
+    position: relative; aspect-ratio: 1; overflow: hidden; display: grid; place-items: center; padding: 16px;
+    background: var(--panel-deep); border: 1px dashed var(--border); border-radius: 9px;
+    color: var(--muted); font-size: 13px; text-align: center;
+  }
+  .frame.over { border-color: var(--accent); border-style: solid; }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .try .buttons { margin-top: 0; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 14px; }
+  .check input { accent-color: var(--accent); }
+  .try .hint { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .result { display: flex; gap: 16px; align-items: center; margin-top: 16px; padding: 14px; background: var(--panel-deep); border: 1px solid var(--border); border-radius: 9px; }
+  .result img { width: 72px; height: 72px; border-radius: 6px; object-fit: cover; background: var(--panel); }
+  .result b { font-size: 52px; line-height: 1; min-width: 1ch; color: var(--accent-soft); }
+  .result p { margin: 0; font-size: 13px; color: var(--muted); }
+  .result p:first-child { color: var(--text); font-size: 15px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -100,7 +121,7 @@
   </header>
 
   <div class="grid">
-    <section class="card">
+    <section class="card" id="setup">
       <h2>Training setup</h2>
       <div class="seg" role="radiogroup" aria-label="Training mode">
         <input type="radio" name="mode" id="mode-train" value="train" checked><label for="mode-train">Train model</label>
@@ -114,9 +135,9 @@
         <span class="hint">How big a step Adam takes on each update. Too high and the loss jumps around, too low and learning is slow. 0.001 is a safe start.</span>
       </div>
       <div class="field">
-        <label for="minutes"><span id="minutes-label">Training minutes</span></label>
-        <input type="number" id="minutes" step="any">
-        <span class="hint" id="minutes-hint"></span>
+        <label for="epochs"><span id="epochs-label">Epochs</span></label>
+        <input type="number" id="epochs" step="1">
+        <span class="hint" id="epochs-hint"></span>
       </div>
       <div class="field">
         <label for="batchSize">Batch size</label>
@@ -181,12 +202,46 @@
       </section>
     </div>
   </div>
+
+  <section class="card" id="try-card">
+    <div class="top">
+      <h2 style="margin:0">Try the model</h2>
+      <span class="pill stopped" id="p-state">locked</span>
+    </div>
+    <p class="mode-hint" id="p-reason">Checking for a finished model...</p>
+    <div class="try locked" id="try">
+      <div class="frame" id="frame">
+        <span id="p-empty">Drop an image here or choose one. Only the square is sent to the model.</span>
+        <img id="p-image" alt="Chosen image" hidden>
+      </div>
+      <div>
+        <div class="buttons">
+          <button class="primary" id="p-pick" disabled>Choose image</button>
+        </div>
+        <input type="file" id="p-file" accept="image/*" hidden>
+        <label class="check"><input type="checkbox" id="p-flip" disabled> Flip left and right before sending</label>
+        <span class="hint">
+          Mirrors the image before it is sent. The training photos are mostly right hands, so try this for a left-handed sign.
+        </span>
+        <div class="result" id="p-result">
+          <img id="p-sent" alt="Image sent to the model" hidden>
+          <b id="p-char">-</b>
+          <div>
+            <p id="p-conf">No prediction yet</p>
+            <p id="p-others"></p>
+            <p id="p-tip" hidden>Not sure. A plain background, good light and a hand that fills the square help.</p>
+          </div>
+        </div>
+        <div class="msg" id="p-msg" role="alert"></div>
+      </div>
+    </div>
+  </section>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-const FIELDS = ["lr", "minutes", "batchSize", "datasetPower", "evalEvery", "k", "workers"];
-let limits = {}, last = null;
+const FIELDS = ["lr", "epochs", "batchSize", "datasetPower", "evalEvery", "k", "workers"];
+let limits = {}, last = null, lastAt = 0;
 
 async function api(path, body) {
   const options = body === undefined ? {} : {
@@ -204,10 +259,10 @@ function syncMode() {
   const kfold = mode() === "kfold";
   $("row-evalEvery").hidden = kfold;
   $("row-k").hidden = !kfold;
-  $("minutes-label").textContent = kfold ? "Minutes per fold" : "Training minutes";
-  $("minutes-hint").textContent = kfold
-    ? "Time limit for each fold, including loader start-up and its final check. The total is minutes x folds."
-    : "Time limit for the whole run, including loader start-up and the final validation check. Training stops when time is up, not after a set number of passes.";
+  $("epochs-label").textContent = kfold ? "Epochs per fold" : "Epochs";
+  $("epochs-hint").textContent = kfold
+    ? "How many passes each fold's fresh model makes over the other folds' data. Every fold runs this many, so the total is folds x epochs."
+    : "How many passes to make over the training data. One epoch takes a few minutes on a laptop CPU. The best version seen at any check is kept, so extra epochs don't hurt the saved model.";
   $("mode-hint").textContent = kfold
     ? "Trains a fresh model on each fold to estimate how well this setup generalises. Nothing is saved."
     : "Trains one model on all the training data and saves the best version as model.pt.";
@@ -229,6 +284,21 @@ function readForm() {
 
 const pct = v => (v * 100).toFixed(1) + "%";
 const clock = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+
+function tick() {
+  // the server reports every 1.5 s, so count the seconds in between locally to keep the clock smooth
+  if (!last || !last.params) { $("time").textContent = ""; return; }
+  const running = last.state === "running" || last.state === "stopping";
+  const gap = running ? (performance.now() - lastAt) / 1000 : 0;
+  const p = last.progress;
+  let text = clock(last.elapsed + gap);
+  if (!p) text += running ? " · loading data" : "";
+  else {
+    text += ` · epoch ${p.epoch}/${p.epochs}` + (p.folds > 1 ? `, fold ${p.fold}/${p.folds}` : "");
+    if (running && p.remaining != null) text += ` · about ${clock(Math.max(0, p.remaining - gap))} left`;
+  }
+  $("time").textContent = text;
+}
 
 function drawChart(history) {
   const canvas = $("chart"), dpr = window.devicePixelRatio || 1;
@@ -278,11 +348,12 @@ function render(s) {
   pill.textContent = s.state; pill.className = "pill " + s.state;
   $("start").disabled = running;
   $("stop").disabled = s.state !== "running";
-  for (const el of document.querySelectorAll(".card input")) el.disabled = running;
+  for (const el of document.querySelectorAll("#setup input")) el.disabled = running;
 
-  const budget = s.budgetSeconds || 0;
-  $("time").textContent = s.params ? clock(s.elapsed) + (budget ? " / " + clock(budget) + " budget" : "") : "";
-  $("bar").style.width = (budget ? Math.min(100, s.elapsed / budget * 100) : 0) + "%";
+  lastAt = performance.now();
+  tick();
+  const p = s.progress;
+  $("bar").style.width = (p ? Math.min(100, p.fraction * 100) : 0) + "%";
 
   const kfold = s.params && s.params.mode === "kfold";
   const h = s.history;
@@ -316,7 +387,8 @@ function render(s) {
 async function poll() {
   try {
     render(await api("/api/status"));
-    if (last.state === "done" || last.state === "stopped") loadCheckpoint();
+    // every tick, so predictions lock as soon as training starts and unlock when it finishes
+    loadCheckpoint();
   } catch (e) { /* server may be restarting, try again next tick */ }
 }
 
@@ -325,8 +397,83 @@ async function loadCheckpoint() {
     const c = await api("/api/checkpoint");
     $("checkpoint").textContent = !c.exists ? "No saved model yet"
       : c.valAcc != null ? `Saved model: ${pct(c.valAcc)} validation accuracy (step ${c.step})` : "Saved model found";
+    setReady(c.ready, c.reason);
   } catch (e) { /* ignore */ }
 }
+
+// try the model: only unlocked once the server says a finished model is saved and nothing is training
+let ready = false, picked = null, asked = 0;
+
+function setReady(ok, reason) {
+  ready = ok;
+  $("p-state").textContent = ok ? "ready" : "locked";
+  $("p-state").className = "pill " + (ok ? "done" : "stopped");
+  $("p-reason").textContent = ok
+    ? "Upload a photo of a hand sign and the saved model guesses the character."
+    : reason;
+  $("try").classList.toggle("locked", !ok);
+  for (const id of ["p-pick", "p-flip"]) $(id).disabled = !ok;
+}
+
+function squareShot(source, w, h) {
+  // the centre square at 256px, the same part the model keeps, flipped if asked
+  const side = Math.min(w, h), size = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d");
+  // transparent images get a white background, JPEG would otherwise turn it black
+  g.fillStyle = "#fff"; g.fillRect(0, 0, size, size);
+  if ($("p-flip").checked) { g.translate(size, 0); g.scale(-1, 1); }
+  g.drawImage(source, (w - side) / 2, (h - side) / 2, side, side, 0, 0, size, size);
+  return c.toDataURL("image/jpeg", 0.9);
+}
+
+async function predict(image) {
+  if (!ready) return;
+  const n = ++asked;
+  $("p-msg").textContent = "";
+  $("p-sent").src = image; $("p-sent").hidden = false;
+  $("p-char").textContent = "...";
+  try {
+    const { predictions } = await api("/api/predict", { image });
+    if (n !== asked) return;  // a newer image was sent meanwhile
+    const [best, ...rest] = predictions;
+    $("p-char").textContent = best.character;
+    $("p-conf").textContent = pct(best.confidence) + " confident";
+    $("p-others").textContent = rest.length ? "Next: " + rest.map(p => `${p.character} ${pct(p.confidence)}`).join(", ") : "";
+    $("p-tip").hidden = best.confidence >= 0.5;
+  } catch (e) {
+    if (n !== asked) return;
+    $("p-char").textContent = "-";
+    $("p-conf").textContent = "No prediction";
+    $("p-others").textContent = "";
+    $("p-tip").hidden = true;
+    $("p-msg").textContent = e.message;
+  }
+}
+
+function showPicked() {
+  const shot = squareShot(picked, picked.naturalWidth, picked.naturalHeight);
+  $("p-image").src = shot; $("p-image").hidden = false; $("p-empty").hidden = true;
+  predict(shot);
+}
+
+function pickFile(file) {
+  if (!file || !ready) return;
+  if (!file.type.startsWith("image/")) { $("p-msg").textContent = "That file isn't an image"; return; }
+  const img = new Image();
+  img.onload = () => { URL.revokeObjectURL(img.src); picked = img; showPicked(); };
+  img.onerror = () => { URL.revokeObjectURL(img.src); $("p-msg").textContent = "This browser can't open that image, try a JPEG or PNG"; };
+  img.src = URL.createObjectURL(file);
+}
+
+$("p-pick").onclick = () => $("p-file").click();
+$("p-file").onchange = () => { pickFile($("p-file").files[0]); $("p-file").value = ""; };
+$("p-flip").onchange = () => { if (picked) showPicked(); };
+const frame = $("frame");
+frame.ondragover = e => { e.preventDefault(); if (ready) frame.classList.add("over"); };
+frame.ondragleave = () => frame.classList.remove("over");
+frame.ondrop = e => { e.preventDefault(); frame.classList.remove("over"); pickFile(e.dataTransfer.files[0]); };
 
 $("start").onclick = async () => {
   $("msg").textContent = "";
@@ -358,6 +505,7 @@ window.addEventListener("resize", () => last && drawChart(last.params && last.pa
     syncMode();
   }
   setInterval(poll, 1500);
+  setInterval(tick, 250);
 })();
 </script>
 </body>
