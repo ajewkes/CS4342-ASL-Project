@@ -140,7 +140,10 @@ def kfold_loaders(k=3, batch_size=64, seed=0, num_workers=8, datasetPower=DATASE
     plain = trainingSets(evalStandard)
     weights = datasetWeights(augmented, datasetPower)
 
-    for trainIdx, foldIdx in kfold_indices(len(augmented), k, seed):
+    # datasets switched off with a scale of 0 are left out of the folds too, so no fold scores on them
+    usable = (weights > 0).nonzero().flatten()
+    for trainIdx, foldIdx in kfold_indices(len(usable), k, seed):
+        trainIdx, foldIdx = usable[trainIdx].tolist(), usable[foldIdx].tolist()
         sampler = WeightedRandomSampler(weights[trainIdx], len(trainIdx), replacement=True)
         yield (
             makeLoader(Subset(augmented, trainIdx), batch_size, True, num_workers, sampler),
